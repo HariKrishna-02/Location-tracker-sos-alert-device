@@ -4,50 +4,29 @@ IoT-based Location Tracking &amp; SOS Alert Device using ESP32, NEO-6M GPS, MPU6
 # Materials List
 - ESP32 DevKit V1 [memory:6]
 - NEO-6M GPS Module [memory:15] 
-- MPU6050 IMU [memory:10]
-- 2x FSR Sensors
 - SIM800L GSM Module
-- DHT22 Sensor [memory:18]
-- MQ135 Gas Sensor
-- 0.96" OLED SSD1306
-- Vibration Motor
+- LCD Display
+- Buck Converter
+- Buzzer
 - Push Button (SOS)
 - 3.7V LiPo Battery
 - Jumper Wires
 
 # Connections
 
-ESP32 → Components:
+ESP32 Pin Connections:
 
-GPIO 4 → DHT22 Data
+GPIO4  → GPS TX (NEO-6M)
+GPIO18 → GPS RX (NEO-6M) 
+GPIO16 → SIM800L TX
+GPIO17 → SIM800L RX
+GPIO21 → I2C LCD SDA
+GPIO22 → I2C LCD SCL
+GPIO2  → Buzzer (+)
+GPIO0  → SOS Button
+5V     → Buck Converter IN
+3.3V   → GPS/LCD VCC
+GND    → All GND
 
-GPIO 5 → NEO-6M TX
-
-GPIO 18 → NEO-6M RX
-
-GPIO 21 → MPU6050 SDA
-
-GPIO 22 → MPU6050 SCL
-
-GPIO 19 → SIM800L TX
-
-GPIO 23 → SIM800L RX
-
-GPIO 2 → OLED SDA
-
-GPIO 15 → OLED SCL
-
-GPIO 13 → FSR1 (Seat)
-
-GPIO 12 → FSR2 (Back)
-
-GPIO 14 → SOS Button
-
-GPIO 27 → Vibration Motor (+)
-
-GND → All GND
-
-3.3V → Sensors VCC
-
-5V → SIM800L VCC
-
+SIM800L VCC → Buck Converter OUT (4.0-4.2V)
+[memory:15][memory:6]
