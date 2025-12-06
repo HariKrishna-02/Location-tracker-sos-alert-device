@@ -41,3 +41,9 @@ GND    → All GND
 SIM800L VCC → Buck Converter OUT (4.0-4.2V)
 
 [memory:15][memory:6]
+
+
+## Credits
+
+Created by **[JP HariKrishna Raj]**  
+Project: **Location tracker sos alert device**
