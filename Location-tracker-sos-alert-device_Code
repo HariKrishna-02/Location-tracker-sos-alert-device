@@ -1,0 +1,315 @@
+#include <TinyGPS++.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// ===== ESP32 PIN CONFIGURATION =====
+// UART1 for GPS
+#define GPS_RX_PIN 16       // ESP32 RX (connect to Neo-6M TX)
+#define GPS_TX_PIN 17       // ESP32 TX (usually unused)
+
+// UART2 for GSM
+#define GSM_RX_PIN 26       // ESP32 RX2 (connect to SIM800L TXD)
+#define GSM_TX_PIN 27       // ESP32 TX2 (connect to SIM800L RXD)
+
+#define SOS_BUTTON_PIN 5    // SOS button (one side to GPIO5, other side to GND)
+#define BUZZER_PIN 4        // Buzzer ( + to GPIO4, - to GND )
+#define MIC_PIN 34          // Optional microphone analog input (not used yet)
+
+// Emergency contacts
+String emergency_numbers[] = {
+  "79750*****",  // Mom
+  "63632*****",  // Dad
+  "96293*****"   // Friend
+};
+int num_contacts = 3;
+
+// Hardware serial ports
+HardwareSerial gpsSerial(1);   // UART1 for GPS
+HardwareSerial gsmSerial(2);   // UART2 for GSM
+
+TinyGPSPlus gps;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Global state
+bool button_pressed = false;
+bool sms_sent = false;
+unsigned long last_button_time = 0;
+const long debounce_delay = 50;
+unsigned long last_auto_sms = 0;
+const long auto_sms_interval = 3600000;  // 1 hour
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+
+  // UART1: GPS @9600
+  gpsSerial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+
+  // UART2: GSM @115200
+  gsmSerial.begin(9600, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
+
+  pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);  // button to GND
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(MIC_PIN, INPUT);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.print("ESP32 SOS v2.0");
+  lcd.setCursor(0, 1);
+  lcd.print("Initializing...");
+
+  Serial.println();
+  Serial.println("[SETUP] ESP32 GPS SOS Tracker Starting");
+
+  delay(2000);
+
+  // GSM init (SIM800L; RST is tied to 3.3V via 10k resistor in hardware)
+  Serial.println("[SETUP] Initializing GSM Module...");
+  gsmSerial.println("ATE0");           // disable echo
+  delay(500);
+  gsmSerial.println("AT+CMGF=1");      // SMS text mode
+  delay(500);
+  gsmSerial.println("AT+CNMI=2,1,0,1");// new SMS indication
+  delay(500);
+
+  // GPS test
+  Serial.println("[SETUP] Testing GPS Module for 30 sec...");
+  lcd.clear();
+  lcd.print("GPS: Searching");
+  lcd.setCursor(0, 1);
+  lcd.print("Wait up to 30s");
+
+  unsigned long start_time = millis();
+  bool gps_locked = false;
+
+  while (millis() - start_time < 30000) {
+    while (gpsSerial.available() > 0) {
+      gps.encode(gpsSerial.read());
+      if (gps.location.isUpdated()) {
+        Serial.println("[GPS] Lock acquired");
+        Serial.print("[GPS] Lat: ");
+        Serial.println(gps.location.lat(), 6);
+        Serial.print("[GPS] Lon: ");
+        Serial.println(gps.location.lng(), 6);
+
+        lcd.clear();
+        lcd.print("GPS: OK");
+        lcd.setCursor(0, 1);
+        lcd.print("Ready for SOS");
+        gps_locked = true;
+        delay(2000);
+        break;
+      }
+    }
+    if (gps_locked) break;
+  }
+
+  if (!gps_locked) {
+    Serial.println("[GPS] No lock within 30s (maybe indoors)");
+  }
+
+  lcd.clear();
+  lcd.print("System Ready");
+  lcd.setCursor(0, 1);
+  lcd.print("Press SOS Btn");
+
+  Serial.println("[SETUP] Setup complete. Waiting for SOS...");
+}
+
+// ===== MAIN LOOP =====
+void loop() {
+  // GPS stream
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  // GSM responses
+  while (gsmSerial.available() > 0) {
+    String response = gsmSerial.readStringUntil('\n');
+    response.trim();
+    if (response.length() > 0) {
+      Serial.println("[GSM RX] " + response);
+      handleGSMResponse(response);
+    }
+  }
+
+  // SOS button logic
+  int button_state = digitalRead(SOS_BUTTON_PIN);
+
+  if (button_state == LOW && !button_pressed) {  // pressed
+    if (millis() - last_button_time > debounce_delay) {
+      button_pressed = true;
+      last_button_time = millis();
+      sms_sent = false;
+
+      Serial.println("[BUTTON] SOS PRESSED!");
+      soundAlarm();
+      sendEmergencySMS();
+    }
+  }
+
+  if (button_state == HIGH && button_pressed) {  // released
+    button_pressed = false;
+  }
+
+  // Optional auto SMS every hour
+  if (!button_pressed && millis() - last_auto_sms > auto_sms_interval) {
+    sendLocationUpdate();
+    last_auto_sms = millis();
+  }
+
+  updateLCDDisplay();
+
+  delay(100);
+}
+
+// ===== BUZZER =====
+void soundAlarm() {
+  for (int i = 0; i < 5; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(200);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(200);
+  }
+  Serial.println("[BUZZER] Alert sounded (5x)");
+}
+
+// ===== EMERGENCY SMS =====
+void sendEmergencySMS() {
+  if (!gps.location.isValid()) {
+    Serial.println("[SMS] ERROR: GPS invalid, no fix yet");
+    lcd.clear();
+    lcd.print("ERROR: No GPS");
+    lcd.setCursor(0, 1);
+    lcd.print("Lock yet!");
+    return;
+  }
+
+  String lat = String(gps.location.lat(), 6);
+  String lng = String(gps.location.lng(), 6);
+  String link = "https://maps.google.com/?q=" + lat + "," + lng;
+
+  String msg = "EMERGENCY! I NEED HELP!\n";
+  msg += "Location: " + lat + ", " + lng + "\n";
+  msg += link + "\n";
+  msg += "Time: " + getTimeString() + "\n";
+  msg += "Battery: " + String(readBatteryLevel()) + "%";
+
+  Serial.println("[SMS] Message body:");
+  Serial.println(msg);
+
+  for (int i = 0; i < num_contacts; i++) {
+    Serial.print("[SMS] Sending to ");
+    Serial.println(emergency_numbers[i]);
+
+    gsmSerial.print("AT+CMGS=\"");
+    gsmSerial.print(emergency_numbers[i]);
+    gsmSerial.println("\"");
+    delay(1000);
+
+    gsmSerial.print(msg);
+    gsmSerial.write(26); // CTRL+Z
+    delay(3000);
+
+    Serial.println("[SMS] Sent to " + emergency_numbers[i]);
+  }
+
+  sms_sent = true;
+
+  lcd.clear();
+  lcd.print("SOS SENT!");
+  lcd.setCursor(0, 1);
+  lcd.print("Location shared");
+
+  soundAlarm();
+}
+
+// ===== HOURLY UPDATE =====
+void sendLocationUpdate() {
+  if (!gps.location.isValid()) {
+    Serial.println("[AUTO] No GPS fix; skipping update");
+    return;
+  }
+
+  String lat = String(gps.location.lat(), 6);
+  String lng = String(gps.location.lng(), 6);
+  String link = "https://maps.google.com/?q=" + lat + "," + lng;
+
+  String msg = "Auto Location Update\n";
+  msg += lat + ", " + lng + "\n";
+  msg += link + "\n";
+  msg += "Time: " + getTimeString();
+
+  gsmSerial.print("AT+CMGS=\"");
+  gsmSerial.print(emergency_numbers[0]); // first contact only
+  gsmSerial.println("\"");
+  delay(1000);
+
+  gsmSerial.print(msg);
+  gsmSerial.write(26);
+  delay(3000);
+
+  Serial.println("[AUTO] Location update sent to " + emergency_numbers[0]);
+}
+
+// ===== GSM RESPONSE HANDLER =====
+void handleGSMResponse(String response) {
+  if (response.indexOf("+CMT:") != -1) {
+    Serial.println("[GSM] Incoming SMS detected – auto reply with location");
+    sendLocationUpdate();
+  }
+
+  if (response.indexOf("+CMGS:") != -1) {
+    Serial.println("[GSM] SMS delivery confirmed");
+  }
+
+  if (response.indexOf("ERROR") != -1) {
+    Serial.println("[GSM] ERROR response from SIM800L");
+  }
+}
+
+// ===== LCD STATUS SCREEN =====
+void updateLCDDisplay() {
+  static unsigned long last_update = 0;
+  if (millis() - last_update < 1000) return;
+  last_update = millis();
+
+  lcd.clear();
+
+  // Line 1: GPS
+  if (gps.location.isValid()) {
+    lcd.print("GPS:OK");
+  } else {
+    lcd.print("GPS:SEARCH");
+  }
+  lcd.setCursor(10, 0);
+  lcd.print("Sat:");
+  lcd.print(gps.satellites.value());
+
+  // Line 2: Battery + State
+  lcd.setCursor(0, 1);
+  lcd.print("Batt:");
+  lcd.print(readBatteryLevel());
+  lcd.print("% ");
+
+  lcd.setCursor(10, 1);
+  if (button_pressed) lcd.print("SOS!");
+  else lcd.print("READY");
+}
+
+// ===== TIME STRING FROM GPS =====
+String getTimeString() {
+  if (!gps.time.isValid()) return "N/A";
+
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+           gps.time.hour(), gps.time.minute(), gps.time.second());
+  return String(buf);
+}
+
+// ===== BATTERY LEVEL (MOCK) =====
+int readBatteryLevel() {
+  // TODO: connect Li-ion via divider to an ADC pin and compute %
+  // For now, return fixed 85% for display/demo
+  return 85;
+}
